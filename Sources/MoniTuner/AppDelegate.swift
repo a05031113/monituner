@@ -8,7 +8,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mediaKeyTap = MediaKeyTap()
     private let autoBrightnessLoop = AutoBrightnessLoop()
 
+    // MARK: - UserDefaults Keys
+    private static let keyAutoBrightnessEnabled = "autoBrightnessEnabled"
+    private static let keySensorInterval = "sensorInterval"
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        loadSettings()
         DisplayManager.shared.refreshDisplays()
         setupMenuBar()
 
@@ -102,10 +107,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let item = menu.items.first(where: { $0.title == "Auto Brightness" }) {
             item.state = autoBrightnessLoop.isEnabled ? .on : .off
         }
+        saveSettings()
     }
 
     @objc private func displaysChanged() {
         DisplayManager.shared.refreshDisplays()
         mediaKeyTap.updateInterception()
+    }
+
+    // MARK: - Settings Persistence
+
+    private func loadSettings() {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Self.keyAutoBrightnessEnabled) != nil {
+            autoBrightnessLoop.isEnabled = defaults.bool(forKey: Self.keyAutoBrightnessEnabled)
+        }
+        let interval = defaults.double(forKey: Self.keySensorInterval)
+        if interval > 0 {
+            autoBrightnessLoop.intervalSeconds = interval
+        }
+    }
+
+    func saveSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(autoBrightnessLoop.isEnabled, forKey: Self.keyAutoBrightnessEnabled)
+        defaults.set(autoBrightnessLoop.intervalSeconds, forKey: Self.keySensorInterval)
     }
 }

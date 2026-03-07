@@ -84,10 +84,16 @@ struct MainWindowView: View {
 final class MainWindowViewModel: ObservableObject {
     @Published var externalDisplays: [ExternalDisplay] = []
     @Published var autoBrightnessEnabled: Bool {
-        didSet { autoBrightnessLoop.isEnabled = autoBrightnessEnabled }
+        didSet {
+            autoBrightnessLoop.isEnabled = autoBrightnessEnabled
+            persistSettings()
+        }
     }
     @Published var sensorInterval: TimeInterval {
-        didSet { autoBrightnessLoop.intervalSeconds = sensorInterval }
+        didSet {
+            autoBrightnessLoop.intervalSeconds = sensorInterval
+            persistSettings()
+        }
     }
     @Published var currentLux: Double?
 
@@ -140,5 +146,11 @@ final class MainWindowViewModel: ObservableObject {
             self?.externalDisplays = DisplayManager.shared.externalDisplays()
             self?.currentLux = self?.autoBrightnessLoop.currentLux
         }
+    }
+
+    private func persistSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(autoBrightnessEnabled, forKey: "autoBrightnessEnabled")
+        defaults.set(sensorInterval, forKey: "sensorInterval")
     }
 }
