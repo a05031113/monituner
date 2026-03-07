@@ -115,9 +115,7 @@ final class MainWindowViewModel: ObservableObject {
     }
 
     func brightness(for display: ExternalDisplay) -> Int {
-        brightnessCache[display.displayID]
-            ?? DisplayManager.shared.getBrightness(for: display)
-            ?? 50
+        brightnessCache[display.displayID] ?? 50
     }
 
     func setBrightness(_ value: Int, for display: ExternalDisplay) {
@@ -142,9 +140,22 @@ final class MainWindowViewModel: ObservableObject {
     }
 
     private func refreshDisplayList() {
-        DispatchQueue.main.async { [weak self] in
-            self?.externalDisplays = DisplayManager.shared.externalDisplays()
-            self?.currentLux = self?.autoBrightnessLoop.currentLux
+        let displays = DisplayManager.shared.externalDisplays()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var newCache: [CGDirectDisplayID: Int] = [:]
+            for display in displays {
+                if let cached = self?.brightnessCache[display.displayID] {
+                    newCache[display.displayID] = cached
+                } else if let value = DisplayManager.shared.getBrightness(for: display) {
+                    newCache[display.displayID] = value
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.brightnessCache.merge(newCache) { existing, _ in existing }
+                self.externalDisplays = displays
+                self.currentLux = self.autoBrightnessLoop.currentLux
+            }
         }
     }
 
