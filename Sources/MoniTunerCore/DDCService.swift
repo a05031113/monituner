@@ -5,6 +5,8 @@ public final class DDCService {
     public static let m1ddcPath = "/opt/homebrew/bin/m1ddc"
 
     private var displayMap: [String: Int] = [:]
+    /// Per-display max luminance DDC value (queried once per refresh).
+    private var maxLuminance: [String: Int] = [:]
 
     public init() {
         refreshDisplayMap()
@@ -15,6 +17,14 @@ public final class DDCService {
     public func refreshDisplayMap() {
         guard let output = runM1DDC(["display", "list"]) else { return }
         displayMap = DDCService.parseDisplayList(output)
+        // Query max luminance for each display
+        maxLuminance.removeAll()
+        for (name, num) in displayMap {
+            if let maxOutput = runM1DDC(["display", "\(num)", "get", "luminance", "max"]),
+               let maxVal = DDCService.parseIntOutput(maxOutput), maxVal > 0 {
+                maxLuminance[name] = maxVal
+            }
+        }
     }
 
     /// Parse `m1ddc display list` output. Lines: `[3] VP32UQ (UUID...)`
@@ -46,22 +56,45 @@ public final class DDCService {
 
     // MARK: - Brightness
 
+    /// Returns brightness as 0-100% (normalized by monitor's DDC max).
     public func getBrightness(displayName: String) -> Int? {
         guard let num = displayMap[displayName] else { return nil }
         guard let output = runM1DDC(["display", "\(num)", "get", "luminance"]) else { return nil }
-        return DDCService.parseIntOutput(output)
+        guard let raw = DDCService.parseIntOutput(output) else { return nil }
+        let maxVal = maxLuminance[displayName] ?? 100
+        return DDCService.ddcToPercent(raw: raw, max: maxVal)
     }
 
+    /// Sets brightness from 0-100% (scaled to monitor's DDC max).
     public func setBrightness(displayName: String, value: Int) -> Bool {
         guard let num = displayMap[displayName] else { return false }
-        let clamped = min(max(value, 0), 100)
-        return runM1DDC(["display", "\(num)", "set", "luminance", "\(clamped)"]) != nil
+        let percent = min(max(value, 0), 100)
+        let maxVal = maxLuminance[displayName] ?? 100
+        let raw = DDCService.percentToDDC(percent: percent, max: maxVal)
+        return runM1DDC(["display", "\(num)", "set", "luminance", "\(raw)"]) != nil
+    }
+
+    /// Returns the DDC max luminance value for a display (nil if unknown).
+    public func getMaxLuminance(displayName: String) -> Int? {
+        maxLuminance[displayName]
     }
 
     // MARK: - Helpers
 
     public static func parseIntOutput(_ output: String) -> Int? {
         Int(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Convert raw DDC value to 0-100%.
+    public static func ddcToPercent(raw: Int, max: Int) -> Int {
+        guard max > 0 else { return 0 }
+        return min(100, Int(round(Double(raw) / Double(max) * 100.0)))
+    }
+
+    /// Convert 0-100% to raw DDC value.
+    public static func percentToDDC(percent: Int, max: Int) -> Int {
+        guard max > 0 else { return 0 }
+        return min(max, Int(round(Double(percent) / 100.0 * Double(max))))
     }
 
     @discardableResult
