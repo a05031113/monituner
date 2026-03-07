@@ -1,7 +1,13 @@
 import AppKit
+import CoreGraphics
 import Foundation
 
-/// Background loop that reads the ambient light sensor and adjusts external monitor brightness.
+// Private API to read MacBook built-in display brightness
+@_silgen_name("DisplayServicesGetBrightness")
+private func DisplayServicesGetBrightness(_ display: CGDirectDisplayID, _ brightness: UnsafeMutablePointer<Float>) -> Int32
+
+/// Background loop that follows the MacBook's built-in display brightness
+/// and applies per-display calibration factors to external monitors.
 public final class AutoBrightnessLoop {
     public var isEnabled: Bool = true {
         didSet {
@@ -15,18 +21,18 @@ public final class AutoBrightnessLoop {
         }
     }
 
-    /// Duration of manual override after F1/F2 press.
-    public var manualOverrideDuration: TimeInterval = 300  // 5 minutes
+    /// Per-display calibration factor: how much of Mac's brightness to apply.
+    /// Calibrated when all screens look the same brightness.
+    /// Key = displayID, Value = factor (e.g., 0.63 means set to 63% of Mac's value).
+    public var calibrationFactors: [CGDirectDisplayID: Double] = [:]
 
-    /// Current lux reading (for UI display).
-    public private(set) var currentLux: Double?
+    /// Current MacBook brightness (for UI display).
+    public private(set) var currentMacBrightness: Double?
 
     /// Callback when brightness changes.
     public var onBrightnessUpdated: ((CGDirectDisplayID, Int) -> Void)?
 
-    private let sensor = AmbientSensor()
     private var timer: Timer?
-    private var manualOverrideUntil: Date?
     private var currentBrightness: [CGDirectDisplayID: Int] = [:]
 
     public init() {}
@@ -41,13 +47,28 @@ public final class AutoBrightnessLoop {
     }
 
     /// Called when user manually adjusts brightness (F1/F2).
+    /// Disables auto brightness until the user re-enables it.
     public func triggerManualOverride() {
-        manualOverrideUntil = Date().addingTimeInterval(manualOverrideDuration)
+        isEnabled = false
     }
 
     /// Record brightness set externally.
     public func recordBrightness(_ value: Int, for displayID: CGDirectDisplayID) {
         currentBrightness[displayID] = value
+    }
+
+    /// Calibrate all external displays based on current state.
+    /// Call when all screens visually match in brightness.
+    public func calibrate() {
+        guard let macBrightness = readMacBrightness(), macBrightness > 0 else { return }
+        for display in DisplayManager.shared.externalDisplays() {
+            if let current = DisplayManager.shared.getBrightness(for: display) {
+                let factor = Double(current) / (macBrightness * 100.0)
+                calibrationFactors[display.displayID] = factor
+                NSLog("[MoniTuner] Calibrated \"%@\": Mac=%.0f%% display=%d%% → factor=%.2f",
+                      display.name, macBrightness * 100, current, factor)
+            }
+        }
     }
 
     // MARK: - Private
@@ -65,24 +86,38 @@ public final class AutoBrightnessLoop {
         timer = nil
     }
 
+    private func readMacBrightness() -> Double? {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(16, &ids, &count) == .success else { return nil }
+        for i in 0..<Int(count) {
+            if CGDisplayIsBuiltin(ids[i]) != 0 {
+                var brightness: Float = -1
+                let result = DisplayServicesGetBrightness(ids[i], &brightness)
+                if result == 0, brightness >= 0 {
+                    return Double(brightness)
+                }
+            }
+        }
+        return nil
+    }
+
     private func tick() {
         guard isEnabled else { return }
-
-        if let overrideUntil = manualOverrideUntil, Date() < overrideUntil { return }
-        manualOverrideUntil = nil
-
         guard DisplayManager.shared.isLidOpen else { return }
-        guard let lux = sensor.readLux() else { return }
-        currentLux = lux
+        guard let macBrightness = readMacBrightness() else { return }
+        currentMacBrightness = macBrightness
 
-        let target = Int(round(BrightnessEngine.luxToBrightness(lux)))
-        NSLog("AutoBrightness: lux=%.1f → target=%d%%", lux, target)
+        let macPercent = macBrightness * 100.0
 
         for display in DisplayManager.shared.externalDisplays() {
+            let factor = calibrationFactors[display.displayID] ?? 0.63
+            let target = Int(round(min(max(macPercent * factor, 0), 100)))
             let current = currentBrightness[display.displayID] ?? -1
             guard current != target else { continue }
             let from = current == -1 ? target : current
-            NSLog("AutoBrightness: %@ %d%% → %d%%", display.name, from, target)
+            NSLog("AutoBrightness: Mac=%.0f%% → %@ %d%% → %d%% (factor=%.2f)",
+                  macPercent, display.name, from, target, factor)
             smoothTransition(display: display, from: from, to: target)
         }
     }

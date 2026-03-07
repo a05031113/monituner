@@ -58,14 +58,40 @@ struct MainWindowView: View {
                         .frame(maxWidth: 250)
                     }
 
-                    if let lux = viewModel.currentLux {
+                    if let macBrightness = viewModel.currentMacBrightness {
                         HStack {
-                            Image(systemName: "light.max")
+                            Image(systemName: "sun.max")
                                 .foregroundColor(.yellow)
-                            Text("Ambient: \(Int(round(lux))) lux")
+                            Text("Mac brightness: \(Int(round(macBrightness * 100)))%")
                                 .foregroundColor(.secondary)
                         }
                     }
+                }
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 12).fill(.background))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Keyboard Shortcuts")
+                        .font(.headline)
+
+                    HStack(spacing: 4) {
+                        KeyCap("⌃")
+                        KeyCap("F2")
+                        Text("Brightness Up")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack(spacing: 4) {
+                        KeyCap("⌃")
+                        KeyCap("F1")
+                        Text("Brightness Down")
+                            .foregroundColor(.secondary)
+                    }
+
+                    Text("Controls the external monitor under your mouse cursor.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.top, 2)
                 }
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 12).fill(.background))
@@ -76,6 +102,22 @@ struct MainWindowView: View {
         .frame(minWidth: 380, minHeight: 300)
         .onAppear { viewModel.startRefresh() }
         .onDisappear { viewModel.stopRefresh() }
+    }
+}
+
+// MARK: - KeyCap
+
+private struct KeyCap: View {
+    let label: String
+    init(_ label: String) { self.label = label }
+
+    var body: some View {
+        Text(label)
+            .font(.system(.caption, design: .rounded).bold())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.15)))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
     }
 }
 
@@ -95,7 +137,7 @@ final class MainWindowViewModel: ObservableObject {
             persistSettings()
         }
     }
-    @Published var currentLux: Double?
+    @Published var currentMacBrightness: Double?
 
     private var brightnessCache: [CGDirectDisplayID: Int] = [:]
     private let autoBrightnessLoop: AutoBrightnessLoop
@@ -156,7 +198,7 @@ final class MainWindowViewModel: ObservableObject {
                 // DDC-read values always win
                 self.brightnessCache.merge(freshBrightness) { _, ddcValue in ddcValue }
                 self.externalDisplays = displays
-                self.currentLux = self.autoBrightnessLoop.currentLux
+                self.currentMacBrightness = self.autoBrightnessLoop.currentMacBrightness
             }
         }
     }

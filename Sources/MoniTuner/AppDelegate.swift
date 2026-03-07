@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - UserDefaults Keys
     private static let keyAutoBrightnessEnabled = "autoBrightnessEnabled"
     private static let keySensorInterval = "sensorInterval"
+    private static let keyCalibrationFactors = "calibrationFactors"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadSettings()
@@ -20,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mediaKeyTap.onBrightnessChanged = { [weak self] display, brightness in
             self?.autoBrightnessLoop.triggerManualOverride()
             self?.autoBrightnessLoop.recordBrightness(brightness, for: display.displayID)
+            self?.updateAutoBrightnessMenuItem()
         }
         mediaKeyTap.start()
         autoBrightnessLoop.start()
@@ -70,6 +72,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoItem.state = autoBrightnessLoop.isEnabled ? .on : .off
         menu.addItem(autoItem)
 
+        menu.addItem(NSMenuItem(
+            title: "Calibrate Now",
+            action: #selector(calibrateDisplays),
+            keyEquivalent: ""
+        ))
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(
             title: "Quit",
@@ -103,10 +111,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleAutoBrightness() {
         autoBrightnessLoop.isEnabled.toggle()
+        updateAutoBrightnessMenuItem()
+        saveSettings()
+    }
+
+    private func updateAutoBrightnessMenuItem() {
         if let menu = statusItem.menu,
            let item = menu.items.first(where: { $0.title == "Auto Brightness" }) {
             item.state = autoBrightnessLoop.isEnabled ? .on : .off
         }
+    }
+
+    @objc private func calibrateDisplays() {
+        autoBrightnessLoop.calibrate()
         saveSettings()
     }
 
@@ -126,11 +143,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if interval > 0 {
             autoBrightnessLoop.intervalSeconds = interval
         }
+        if let dict = defaults.dictionary(forKey: Self.keyCalibrationFactors) as? [String: Double] {
+            var factors: [CGDirectDisplayID: Double] = [:]
+            for (key, value) in dict {
+                if let id = UInt32(key) {
+                    factors[id] = value
+                }
+            }
+            autoBrightnessLoop.calibrationFactors = factors
+        }
     }
 
     func saveSettings() {
         let defaults = UserDefaults.standard
         defaults.set(autoBrightnessLoop.isEnabled, forKey: Self.keyAutoBrightnessEnabled)
         defaults.set(autoBrightnessLoop.intervalSeconds, forKey: Self.keySensorInterval)
+        let dict = Dictionary(uniqueKeysWithValues:
+            autoBrightnessLoop.calibrationFactors.map { (String($0.key), $0.value) }
+        )
+        defaults.set(dict, forKey: Self.keyCalibrationFactors)
     }
 }

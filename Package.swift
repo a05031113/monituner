@@ -11,6 +11,7 @@ let package = Package(
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("AppKit"),
+                .unsafeFlags(["-F", "/System/Library/PrivateFrameworks", "-framework", "DisplayServices"]),
             ]
         ),
         .executableTarget(

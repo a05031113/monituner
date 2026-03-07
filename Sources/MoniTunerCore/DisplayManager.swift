@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import IOKit
 
 /// Represents a connected display.
 public struct ExternalDisplay {
@@ -8,12 +9,15 @@ public struct ExternalDisplay {
     public let isBuiltIn: Bool
     /// m1ddc display name for DDC control (nil for built-in).
     public var ddcName: String?
+    /// IOKit framebuffer service for direct DDC I2C (Arm64DDC fallback).
+    public var ioService: io_service_t?
 
-    public init(displayID: CGDirectDisplayID, name: String, isBuiltIn: Bool, ddcName: String? = nil) {
+    public init(displayID: CGDirectDisplayID, name: String, isBuiltIn: Bool, ddcName: String? = nil, ioService: io_service_t? = nil) {
         self.displayID = displayID
         self.name = name
         self.isBuiltIn = isBuiltIn
         self.ddcName = ddcName
+        self.ioService = ioService
     }
 }
 
@@ -23,14 +27,23 @@ public final class DisplayManager {
 
     public private(set) var displays: [ExternalDisplay] = []
     public let ddcService = DDCService()
+    public let softwareDimming = SoftwareDimming()
+
+    /// Displays where DDC write is confirmed broken (use software dimming instead).
+    private var ddcWriteBroken: Set<CGDirectDisplayID> = []
 
     private init() {}
 
     // MARK: - Enumeration
 
-    /// Refresh the list of connected displays and match with m1ddc.
+    /// Refresh the list of connected displays and match with m1ddc + Arm64DDC.
     public func refreshDisplays() {
         ddcService.refreshDisplayMap()
+
+        // Discover IOAVService-capable framebuffers for direct DDC, sorted by path (dispext0 < dispext1)
+        let avServices = Arm64DDC.findAllExternalServices()
+            .sorted { $0.location < $1.location }
+
         var result: [ExternalDisplay] = []
 
         var onlineDisplays = [CGDirectDisplayID](repeating: 0, count: 16)
@@ -48,15 +61,33 @@ public final class DisplayManager {
             let name = Self.displayName(for: id)
             let ddcName = isBuiltIn ? nil : Self.findBestDDCMatch(screenName: name, ddcNames: ddcNames)
 
+            // Match IOAVService by CG enumeration index (matches IOKit dispextN order)
+            let externalIndex = result.filter { !$0.isBuiltIn }.count
+            let ioService: io_service_t? = isBuiltIn ? nil : (externalIndex < avServices.count ? avServices[externalIndex].service : nil)
+
             result.append(ExternalDisplay(
                 displayID: id,
                 name: name,
                 isBuiltIn: isBuiltIn,
-                ddcName: ddcName
+                ddcName: ddcName,
+                ioService: ioService
             ))
         }
 
         displays = result
+
+        // Diagnostic: log display-to-service mapping
+        for d in result where !d.isBuiltIn {
+            let svcPath = d.ioService.flatMap { svc -> String? in
+                var buf = [CChar](repeating: 0, count: 512)
+                IORegistryEntryGetPath(svc, kIOServicePlane, &buf)
+                let path = String(cString: buf)
+                return path.components(separatedBy: "/").first { $0.hasPrefix("dispext") }?.components(separatedBy: ":").first
+            } ?? "nil"
+            NSLog("[MoniTuner] Display \"%@\" (id=%u, unit=%u) ddcName=%@ ioService=%@",
+                  d.name, d.displayID, CGDisplayUnitNumber(d.displayID),
+                  d.ddcName ?? "nil", svcPath)
+        }
     }
 
     // MARK: - Mouse Location
@@ -88,14 +119,76 @@ public final class DisplayManager {
 
     // MARK: - Brightness Control
 
+    /// Set brightness: DDC hardware first, then software gamma fallback.
     public func setBrightness(for display: ExternalDisplay, value: Int) -> Bool {
-        guard let ddcName = display.ddcName else { return false }
-        return ddcService.setBrightness(displayName: ddcName, value: value)
+        let clamped = min(max(value, 0), 100)
+
+        // If DDC is known broken for this display, go straight to software dimming
+        if ddcWriteBroken.contains(display.displayID) {
+            return softwareDimming.setBrightness(displayID: display.displayID, value: clamped)
+        }
+
+        // Try m1ddc first
+        if let ddcName = display.ddcName {
+            let wrote = ddcService.setBrightness(displayName: ddcName, value: clamped)
+            if wrote {
+                if let readBack = ddcService.getBrightness(displayName: ddcName),
+                   abs(readBack - clamped) <= 2 {
+                    return true
+                }
+                // m1ddc write was silently ignored — fall through
+            }
+        }
+
+        // Fallback: direct IOAVService I2C with write verification
+        if let service = display.ioService {
+            let writeOk = Arm64DDC.setBrightness(service: service, value: UInt16(clamped))
+            if writeOk {
+                usleep(50_000) // allow monitor to process
+                if let readBack = Arm64DDC.getBrightness(service: service) {
+                    let readPercent = readBack.max > 0
+                        ? Int(round(Double(readBack.current) / Double(readBack.max) * 100.0))
+                        : Int(readBack.current)
+                    if abs(readPercent - clamped) <= 3 {
+                        return true
+                    }
+                }
+                // Arm64DDC write accepted but ignored by monitor — mark as broken
+                NSLog("[MoniTuner] DDC write broken for \"%@\" — switching to software dimming", display.name)
+                ddcWriteBroken.insert(display.displayID)
+            }
+        }
+
+        // Final fallback: software dimming via gamma
+        return softwareDimming.setBrightness(displayID: display.displayID, value: clamped)
     }
 
+    /// Get brightness: DDC hardware first, then software dimming value.
     public func getBrightness(for display: ExternalDisplay) -> Int? {
-        guard let ddcName = display.ddcName else { return nil }
-        return ddcService.getBrightness(displayName: ddcName)
+        // If using software dimming, return the software value
+        if ddcWriteBroken.contains(display.displayID) {
+            return softwareDimming.getBrightness(displayID: display.displayID)
+        }
+
+        if let ddcName = display.ddcName {
+            if let val = ddcService.getBrightness(displayName: ddcName) {
+                return val
+            }
+        }
+
+        if let service = display.ioService {
+            if let result = Arm64DDC.getBrightness(service: service) {
+                let maxVal = max(result.max, 1)
+                return min(100, Int(round(Double(result.current) / Double(maxVal) * 100.0)))
+            }
+        }
+
+        return nil
+    }
+
+    /// Check if a display is using software dimming.
+    public func isSoftwareDimming(displayID: CGDirectDisplayID) -> Bool {
+        ddcWriteBroken.contains(displayID)
     }
 
     // MARK: - Name Matching
