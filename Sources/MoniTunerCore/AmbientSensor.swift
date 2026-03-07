@@ -1,69 +1,87 @@
 import Foundation
 import IOKit
 
-/// Reads macOS ambient light sensor via IOKit AppleLMUController.
+/// Reads macOS ambient light sensor.
+///
+/// On Apple Silicon Macs, the ambient light sensor value is exposed as the
+/// `AmbientBrightness` property on the built-in display's `IOMobileFramebufferShim`
+/// IOKit service. The value is in fixed-point 16.16 format (divide by 65536 for lux).
 public final class AmbientSensor {
-    private var sensorAvailable: Bool?
-
     public init() {}
 
     public var isAvailable: Bool {
-        if let cached = sensorAvailable { return cached }
-        let available = probeSensor()
-        sensorAvailable = available
-        return available
+        readLux() != nil
     }
 
     /// Read current ambient light in approximate lux.
     public func readLux() -> Double? {
-        guard isAvailable else { return nil }
-
-        let matching = IOServiceMatching("AppleLMUController")
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
-        guard service != IO_OBJECT_NULL else {
-            sensorAvailable = false
-            return nil
+        // Try IOMobileFramebufferShim (Apple Silicon)
+        if let lux = readFromFramebuffer() {
+            return lux
         }
+        // Fallback: AppleLMUController (older Macs)
+        return readFromLMU()
+    }
+
+    // MARK: - IOMobileFramebufferShim (Apple Silicon)
+
+    private func readFromFramebuffer() -> Double? {
+        var iterator: io_iterator_t = 0
+        let result = IOServiceGetMatchingServices(
+            kIOMainPortDefault,
+            IOServiceMatching("IOMobileFramebufferShim"),
+            &iterator
+        )
+        guard result == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(iterator) }
+
+        var bestLux: Double?
+        var service = IOIteratorNext(iterator)
+        while service != 0 {
+            if let prop = IORegistryEntryCreateCFProperty(
+                service, "AmbientBrightness" as CFString, kCFAllocatorDefault, 0
+            )?.takeRetainedValue() as? NSNumber {
+                let raw = prop.int64Value
+                // Fixed-point 16.16 format: divide by 65536
+                let lux = Double(raw) / 65536.0
+                // The built-in display has the real sensor value (> 1.0 lux typically)
+                // External displays report exactly 65536 (= 1.0 lux)
+                if lux > 1.0 {
+                    bestLux = lux
+                }
+            }
+            IOObjectRelease(service)
+            service = IOIteratorNext(iterator)
+        }
+        return bestLux
+    }
+
+    // MARK: - AppleLMUController (fallback for older Macs)
+
+    private func readFromLMU() -> Double? {
+        let service = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("AppleLMUController")
+        )
+        guard service != IO_OBJECT_NULL else { return nil }
         defer { IOObjectRelease(service) }
 
         var dataPort: io_connect_t = 0
-        let openResult = IOServiceOpen(service, mach_task_self_, 0, &dataPort)
-        guard openResult == KERN_SUCCESS else { return nil }
+        guard IOServiceOpen(service, mach_task_self_, 0, &dataPort) == KERN_SUCCESS else { return nil }
         defer { IOServiceClose(dataPort) }
 
         var outputCount: UInt32 = 2
         var values = [UInt64](repeating: 0, count: 2)
-
         let callResult = IOConnectCallMethod(
-            dataPort,
-            0,
-            nil, 0,
-            nil, 0,
-            &values, &outputCount,
-            nil, nil
+            dataPort, 0, nil, 0, nil, 0, &values, &outputCount, nil, nil
         )
-
         guard callResult == KERN_SUCCESS else { return nil }
 
         let avgRaw = (values[0] + values[1]) / 2
         return Self.rawToLux(avgRaw)
     }
 
-    public func resetCache() {
-        sensorAvailable = nil
-    }
-
-    // MARK: - Private
-
-    private func probeSensor() -> Bool {
-        let matching = IOServiceMatching("AppleLMUController")
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
-        if service == IO_OBJECT_NULL { return false }
-        IOObjectRelease(service)
-        return true
-    }
-
-    /// Convert raw sensor reading to approximate lux.
+    /// Convert AppleLMUController raw reading to approximate lux.
     static func rawToLux(_ raw: UInt64) -> Double {
         let x = Double(raw)
         let lux = (-3.0e-27) * pow(x, 4)

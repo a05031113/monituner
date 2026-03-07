@@ -23,7 +23,8 @@ public final class MediaKeyTap {
 
     /// Start listening. Must be called from main thread.
     public func start() {
-        let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << 14)
+        // Listen for all event types to catch brightness keys on modern macOS
+        let eventMask: CGEventMask = CGEventMask(bitPattern: ~0)  // all events
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -82,11 +83,32 @@ public final class MediaKeyTap {
             return Unmanaged.passRetained(event)
         }
 
+        // Debug: log all NX_SYSDEFINED and keyDown events reaching the tap
+        if type.rawValue == 14 || type == .keyDown || type == .keyUp {
+            print("MediaKeyTap: event type=\(type.rawValue)")
+        }
+        if type == .keyDown {
+            let keycode = event.getIntegerValueField(.keyboardEventKeycode)
+            if keycode == Self.keycodeBrightnessUp || keycode == Self.keycodeBrightnessDown {
+                print("MediaKeyTap: keyDown keycode=\(keycode)")
+            }
+        }
+        if type == Self.nxSysDefined {
+            let subtype = event.getIntegerValueField(Self.eventSubtype)
+            if subtype == 8 {
+                let data1 = event.getIntegerValueField(Self.eventData1)
+                let keyCode = (data1 >> 16) & 0xFF
+                let keyFlags = (data1 >> 8) & 0xFF
+                print("MediaKeyTap: NX_SYSDEFINED subtype=8 keyCode=\(keyCode) flags=0x\(String(keyFlags, radix: 16))")
+            }
+        }
+
         guard let direction = extractBrightnessDirection(type: type, event: event) else {
             return Unmanaged.passRetained(event)
         }
 
         guard let display = DisplayManager.shared.displayUnderMouse() else {
+            print("MediaKeyTap: no display under mouse")
             return Unmanaged.passRetained(event)
         }
 
@@ -96,15 +118,21 @@ public final class MediaKeyTap {
         }
 
         // External: consume event, adjust via DDC
-        let current = currentBrightness[display.displayID]
-            ?? Double(DisplayManager.shared.getBrightness(for: display) ?? 50)
+        let current = currentBrightness[display.displayID] ?? 50.0
         let isUp = direction == .up
         let newBrightness = BrightnessEngine.stepBrightness(current: current, isUp: isUp)
         currentBrightness[display.displayID] = newBrightness
 
-        if DisplayManager.shared.setBrightness(for: display, value: Int(round(newBrightness))) {
-            OSDHelper.showBrightnessOSD(displayID: display.displayID, brightness: newBrightness)
-            onBrightnessChanged?(display, Int(round(newBrightness)))
+        let intBrightness = Int(round(newBrightness))
+        print("MediaKeyTap: \(isUp ? "up" : "down") on \(display.name), \(Int(current))% → \(intBrightness)%")
+
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            if DisplayManager.shared.setBrightness(for: display, value: intBrightness) {
+                DispatchQueue.main.async {
+                    OSDHelper.showBrightnessOSD(displayID: display.displayID, brightness: newBrightness)
+                }
+            }
+            self?.onBrightnessChanged?(display, intBrightness)
         }
 
         return nil  // consume event
@@ -132,7 +160,8 @@ public final class MediaKeyTap {
             let data1 = event.getIntegerValueField(Self.eventData1)
             let keyCode = (data1 >> 16) & 0xFF
             let keyFlags = (data1 >> 8) & 0xFF
-            guard keyFlags == 0x0A else { return nil }  // key down only
+            // Bit 0 of flags: 0 = key down, 1 = key up
+            guard keyFlags & 0x1 == 0 else { return nil }
             switch keyCode {
             case Self.nxBrightnessUp: return .up
             case Self.nxBrightnessDown: return .down

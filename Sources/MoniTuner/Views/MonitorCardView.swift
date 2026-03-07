@@ -3,14 +3,11 @@ import SwiftUI
 
 struct MonitorCardView: View {
     let display: ExternalDisplay
-    @State private var brightness: Double
+    let brightness: Int
     let onBrightnessChanged: (Int) -> Void
 
-    init(display: ExternalDisplay, brightness: Int, onBrightnessChanged: @escaping (Int) -> Void) {
-        self.display = display
-        self._brightness = State(initialValue: Double(brightness))
-        self.onBrightnessChanged = onBrightnessChanged
-    }
+    @State private var sliderValue: Double = 50
+    @State private var isDragging = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -20,7 +17,7 @@ struct MonitorCardView: View {
                 Text(display.name)
                     .font(.headline)
                 Spacer()
-                Text("\(Int(round(brightness)))%")
+                Text("\(isDragging ? Int(round(sliderValue)) : brightness)%")
                     .font(.title3)
                     .monospacedDigit()
                     .foregroundColor(.secondary)
@@ -29,9 +26,10 @@ struct MonitorCardView: View {
             HStack(spacing: 8) {
                 Image(systemName: "sun.min")
                     .foregroundColor(.secondary)
-                Slider(value: $brightness, in: 0...100, step: 1) { editing in
+                Slider(value: $sliderValue, in: 0...100, step: 1) { editing in
+                    isDragging = editing
                     if !editing {
-                        onBrightnessChanged(Int(round(brightness)))
+                        onBrightnessChanged(Int(round(sliderValue)))
                     }
                 }
                 Image(systemName: "sun.max")
@@ -41,5 +39,11 @@ struct MonitorCardView: View {
         .padding()
         .background(RoundedRectangle(cornerRadius: 12).fill(.background))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+        .onAppear { sliderValue = Double(brightness) }
+        .onChange(of: brightness) { newValue in
+            if !isDragging {
+                sliderValue = Double(newValue)
+            }
+        }
     }
 }

@@ -76,11 +76,14 @@ public final class AutoBrightnessLoop {
         currentLux = lux
 
         let target = Int(round(BrightnessEngine.luxToBrightness(lux)))
+        NSLog("AutoBrightness: lux=%.1f → target=%d%%", lux, target)
 
         for display in DisplayManager.shared.externalDisplays() {
             let current = currentBrightness[display.displayID] ?? -1
             guard current != target else { continue }
-            smoothTransition(display: display, from: current == -1 ? target : current, to: target)
+            let from = current == -1 ? target : current
+            NSLog("AutoBrightness: %@ %d%% → %d%%", display.name, from, target)
+            smoothTransition(display: display, from: from, to: target)
         }
     }
 

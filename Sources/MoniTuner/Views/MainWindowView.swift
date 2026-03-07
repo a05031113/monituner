@@ -109,8 +109,10 @@ final class MainWindowViewModel: ObservableObject {
         self.sensorInterval = autoBrightnessLoop.intervalSeconds
 
         autoBrightnessLoop.onBrightnessUpdated = { [weak self] displayID, brightness in
-            self?.brightnessCache[displayID] = brightness
-            self?.refreshDisplayList()
+            DispatchQueue.main.async {
+                self?.brightnessCache[displayID] = brightness
+                self?.objectWillChange.send()
+            }
         }
     }
 
@@ -129,7 +131,7 @@ final class MainWindowViewModel: ObservableObject {
 
     func startRefresh() {
         refreshDisplayList()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refreshDisplayList()
         }
     }
@@ -142,17 +144,17 @@ final class MainWindowViewModel: ObservableObject {
     private func refreshDisplayList() {
         let displays = DisplayManager.shared.externalDisplays()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var newCache: [CGDirectDisplayID: Int] = [:]
+            // Always read fresh brightness from DDC
+            var freshBrightness: [CGDirectDisplayID: Int] = [:]
             for display in displays {
-                if let cached = self?.brightnessCache[display.displayID] {
-                    newCache[display.displayID] = cached
-                } else if let value = DisplayManager.shared.getBrightness(for: display) {
-                    newCache[display.displayID] = value
+                if let value = DisplayManager.shared.getBrightness(for: display) {
+                    freshBrightness[display.displayID] = value
                 }
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.brightnessCache.merge(newCache) { existing, _ in existing }
+                // DDC-read values always win
+                self.brightnessCache.merge(freshBrightness) { _, ddcValue in ddcValue }
                 self.externalDisplays = displays
                 self.currentLux = self.autoBrightnessLoop.currentLux
             }
