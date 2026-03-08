@@ -20,10 +20,8 @@ private func debugLog(_ message: String) {
 
 public final class MediaKeyTap {
     private static let nxSysDefined: CGEventType = CGEventType(rawValue: 14)!
-    private static let nxBrightnessUp: Int64 = 2
-    private static let nxBrightnessDown: Int64 = 3
-    private static let eventSubtype: CGEventField = CGEventField(rawValue: 109)!
-    private static let eventData1: CGEventField = CGEventField(rawValue: 110)!
+    private static let nxBrightnessUp: Int = 2
+    private static let nxBrightnessDown: Int = 3
     private static let keycodeBrightnessUp: Int64 = 144
     private static let keycodeBrightnessDown: Int64 = 145
 
@@ -133,19 +131,7 @@ public final class MediaKeyTap {
             return Unmanaged.passRetained(event)
         }
 
-        // Diagnostic: log keyDown events to verify tap receives them
-        if type == .keyDown {
-            let kc = event.getIntegerValueField(.keyboardEventKeycode)
-            let fl = event.flags.rawValue
-            debugLog("keyDown keycode=\(kc) flags=0x\(String(fl, radix: 16))")
-        }
-        if type.rawValue == 14 {
-            let sub = event.getIntegerValueField(Self.eventSubtype)
-            if sub == 8 {
-                let d1 = event.getIntegerValueField(Self.eventData1)
-                debugLog("NX_SYSDEFINED subtype=8 data1=0x\(String(d1, radix: 16))")
-            }
-        }
+        // Only log brightness-related events to avoid noise
 
         guard let direction = extractBrightnessDirection(type: type, event: event) else {
             return Unmanaged.passRetained(event)
@@ -242,10 +228,11 @@ public final class MediaKeyTap {
         }
 
         // Path 3: NX_SYSDEFINED media key events
+        // Must use NSEvent(cgEvent:) — CGEventField(109/110) returns 0 for these events
         if type == Self.nxSysDefined {
-            let subtype = event.getIntegerValueField(Self.eventSubtype)
-            guard subtype == 8 else { return nil }
-            let data1 = event.getIntegerValueField(Self.eventData1)
+            guard let nsEvent = NSEvent(cgEvent: event) else { return nil }
+            guard nsEvent.subtype.rawValue == 8 else { return nil }
+            let data1 = nsEvent.data1
             let keyCode = (data1 >> 16) & 0xFF
             let keyFlags = (data1 >> 8) & 0xFF
             guard keyFlags == 0x0A else { return nil }  // key down only
